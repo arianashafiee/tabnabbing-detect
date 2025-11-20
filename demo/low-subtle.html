@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Low Subtle Change</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial; background: #f5f7fb; color: #222; }
+  header { padding: 24px; background: #ffffff; box-shadow: 0 1px 0 rgba(0,0,0,.08); }
+  h1 { margin: 0; letter-spacing: 0.00px; color: rgb(34, 34, 34); }
+  main { padding: 24px; max-width: 900px; margin: 0 auto; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .btn { display: inline-block; background: #0d6efd; color: #fff; border-radius: 8px; padding: 10px 14px; border: none; }
+</style>
+</head>
+<body>
+<header><h1>Low Subtle Change</h1></header>
+<main>
+  <div class="card">
+    <p>This page tweaks a few pixels when it loses focus:</p>
+    <ul>
+      <li><code>h1</code> color shifts by 1 RGB value.</li>
+      <li>Button background shifts by 1 hex unit.</li>
+      <li>Letter-spacing changes by 0.01px.</li>
+    </ul>
+    <button class="btn">Primary</button>
+  </div>
+  <p>Switch to another tab and return.</p>
+</main>
+<script>
+let changed = false;
+window.addEventListener('blur', () => {
+  if (changed) return;
+  setTimeout(() => {
+    const h1 = document.querySelector('h1');
+    h1.style.color = 'rgb(34, 34, 33)';
+    h1.style.letterSpacing = '0.01px';
+    const btn = document.querySelector('.btn');
+    btn.style.background = '#0d6efe';
+    changed = true;
+    console.log('Low subtle change applied.');
+  }, 1000);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visual Diff Test Pages</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; }
+  header { padding: 20px; background: #0d6efd; color: #fff; }
+  main { padding: 24px; max-width: 900px; margin: 0 auto; }
+  a { color: #0d6efd; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul { margin: 16px 0; padding-left: 20px; }
+  code { background: rgba(0,0,0,.06); padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header><h1>Visual Diff / Tabnabbing Demo Pages</h1></header>
+<main>
+  <p>Open one, wait ~2–3s, switch to another tab, then come back.</p>
+  <ul>
+    <li><a href="low-subtle.html">Low subtle change</a></li>
+    <li><a href="medium-adjacent.html">Medium (adjacent to high)</a></li>
+    <li><a href="high-full-rebrand.html">High (full rebrand)</a></li>
+    <li><a href="area-percent.html">Deterministic area coverage</a> — try <code>?p=25&mode=blur</code></li>
+    <li><a href="dynamic-noise.html">Dynamic subtle noise</a></li>
+  </ul>
+  <p><strong>Tip:</strong> If you open via <code>file://</code>, enable the extension’s “Allow access to file URLs”. Using <code>http://localhost</code> is preferable.</p>
+</main>
+</body>
+</html>
