@@ -14,6 +14,7 @@ URLS = [
     "/demo/high-full-rebrand.html",
     "/demo/area-percent.html?p=25&mode=blur",
     "/demo/dynamic-noise.html",
+    "/demo/cc-attack.html",
 ]
 
 def port_in_use(port: int) -> bool:

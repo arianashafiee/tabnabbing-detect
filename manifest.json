@@ -1,31 +1,42 @@
 {
     "manifest_version": 3,
-    "name": "Tab Rewind Guard",
-    "version": "1.2.0",
-    "description": "Detects tabnabbing by comparing a tab before/after focus changes; highlights changes and shows similarity.",
-    "permissions": ["tabs", "activeTab", "offscreen"],
-    "host_permissions": ["<all_urls>"],
-    "background": { "service_worker": "background.js" },
+    "name": "TabNabbing Defender",
+    "version": "1.0.0",
+    "description": "Protects against tabnabbing phishing attacks by monitoring visual changes in unfocused tabs and alerting users to potential security threats.",
+    "permissions": [
+      "tabs",
+      "activeTab",
+      "offscreen"
+    ],
+    "host_permissions": [
+      "<all_urls>"
+    ],
+    "background": {
+      "service_worker": "monitor.js"
+    },
     "content_scripts": [
       {
-        "matches": ["<all_urls>"],
-        "js": ["content.js"],
+        "matches": [
+          "<all_urls>"
+        ],
+        "js": [
+          "visualizer.js"
+        ],
         "run_at": "document_idle"
       }
     ],
     "action": {
-      "default_title": "Tab Rewind Guard",
-      "default_popup": "popup.html",
+      "default_title": "TabNabbing Defender - Protecting your tabs",
+      "default_popup": "control.html",
       "default_icon": {
-        "16": "icons/icon16.png",
-        "48": "icons/icon48.png",
-        "128": "icons/icon128.png"
+        "16": "icons/shield16.png",
+        "48": "icons/shield48.png",
+        "128": "icons/shield128.png"
       }
     },
     "icons": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
+      "16": "icons/shield16.png",
+      "48": "icons/shield48.png",
+      "128": "icons/shield128.png"
     }
   }
-  
