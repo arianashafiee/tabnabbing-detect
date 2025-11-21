@@ -3,13 +3,25 @@
   "name": "TabNabbing Defender",
   "version": "1.0.0",
   "description": "Protects against tabnabbing phishing attacks by monitoring visual changes in unfocused tabs and alerting users to potential security threats.",
-  "permissions": ["tabs", "activeTab", "offscreen"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "monitor.js" },
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "monitor.js"
+  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["visualizer.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "visualizer.js"
+      ],
       "run_at": "document_idle"
     }
   ],

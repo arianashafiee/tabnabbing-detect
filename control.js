@@ -1,40 +1,88 @@
-// Popup control — compact, only "Clear Page Highlights"
 (async () => {
-  const $ = (id) => document.getElementById(id);
-  const setStatus = (msg) => { $('feedback').textContent = msg || ''; };
+  // ---------- feedback helpers ----------
+  const setFeedback = (msg, kind = 'info') => {
+    const el = document.getElementById('feedback');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = kind;
 
-  const getActive = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return tab || null;
+    if (kind !== 'info') {
+      setTimeout(() => {
+        el.textContent = '';
+        el.className = '';
+      }, 3500);
+    }
   };
 
-  const SYSTEM_PREFIXES = [
-    'chrome://','chrome-extension://','edge://','about:','devtools://',
-    'brave://','vivaldi://','opera://','moz-extension://'
-  ];
-  const isSystem = (url) => !url || SYSTEM_PREFIXES.some(p => url.startsWith(p));
+  // ---------- tab helpers ----------
+  const fetchActiveTab = async () => {
+    const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return t || null;
+  };
 
-  // Clear overlays/badge
-  $('clearBtn').addEventListener('click', async () => {
-    const tab = await getActive();
-    if (!tab?.id) return setStatus('No active tab.');
+  // Expanded set of internal/privileged schemes & non-web contexts we avoid
+  const BLOCKED_SCHEMES = [
+    'chrome://',
+    'chrome-untrusted://',
+    'chrome-extension://',
+    'edge://',
+    'devtools://',
+    'about:',
+    'brave://',
+    'vivaldi://',
+    'opera://',
+    'moz-extension://',
+    'resource://',
+    'view-source:',
+    'file://',
+    'data:',
+    'blob:' 
+  ];
+
+  const isInternalOrRestricted = (url) =>
+    !url || BLOCKED_SCHEMES.some(p => url.startsWith(p));
+
+  // ---------- startup ----------
+  const boot = async () => {
+    const tab = await fetchActiveTab();
+
+    if (!tab?.id) {
+      setFeedback('Unable to detect active tab', 'error');
+      const btn = document.getElementById('clearBtn');
+      if (btn) btn.disabled = true;
+      return;
+    }
+
+    if (isInternalOrRestricted(tab.url)) {
+      setFeedback('Runs only on regular web pages.', 'info');
+    } else {
+      setFeedback('Ready.', 'info');
+    }
+  };
+
+  // ---------- clear overlays action ----------
+  document.getElementById('clearBtn').addEventListener('click', async () => {
+    const tab = await fetchActiveTab();
+    if (!tab?.id) {
+      setFeedback('No active tab detected', 'error');
+      return;
+    }
+
+    // wipe badge
     chrome.action.setBadgeText({ tabId: tab.id, text: '' });
+
+    // remove page visuals
     try {
       await chrome.tabs.sendMessage(tab.id, { type: 'visualize:remove' });
-      setStatus('Highlights cleared.');
+      setFeedback('All highlights cleared', 'success');
     } catch {
-      setStatus(isSystem(tab.url) ? 'Highlights cleared (system tab).' : 'Highlights cleared.');
+      // expected on restricted pages
+      setFeedback(
+        isInternalOrRestricted(tab.url) ? 'Cleared (system page)' : 'Highlights cleared',
+        'success'
+      );
     }
   });
 
-  // Init
-  const tab = await getActive();
-  if (!tab?.id) {
-    $('clearBtn').disabled = true;
-    setStatus('No active tab.');
-  } else if (isSystem(tab.url)) {
-    setStatus('Runs only on regular web pages.');
-  } else {
-    setStatus('Ready.');
-  }
+  await boot();
 })();

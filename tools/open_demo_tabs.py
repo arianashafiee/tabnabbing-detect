@@ -9,10 +9,7 @@ from pathlib import Path
 DEMO_REL = Path("demo/index.html")
 URLS = [
     "/demo/index.html",
-    "/demo/low-subtle.html",
     "/demo/medium-adjacent.html",
-    "/demo/high-full-rebrand.html",
-    "/demo/area-percent.html?p=25&mode=blur",
     "/demo/dynamic-noise.html",
     "/demo/cc-attack.html?auto=0",          # prevent auto-run; requires button + tab-away/return
 ]

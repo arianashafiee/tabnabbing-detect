@@ -1,204 +1,157 @@
-// visualizer.js — overlay renderer for on-page change highlights
+// Paints change overlays and a small status HUD in the page, and cleans them up on demand.
 
 (() => {
-  const ROOT_ID = 'tnb-overlay-root';
-  const HUD_ID = 'tnb-hud';
-  const CSS_ID = 'tnb-style';
+  let layerEl = null;     // overlay container
+  let hudEl = null;       // top-right status HUD
+  let resizeUnsub = null; // active resize listener
+  let lastPayload = null; // cache last draw for responsive repaint
 
-  const levelTint = (lvl) => {
-    switch (lvl) {
-      case 'critical': return 'rgba(233, 30, 99, 0.55)';  // #E91E63
-      case 'warning':  return 'rgba(255, 107, 53, 0.48)'; // #FF6B35
-      case 'minor':    return 'rgba(255, 167, 38, 0.42)'; // #FFA726
-      default:         return 'rgba(255, 167, 38, 0.42)';
-    }
+  // Ensure a single full-viewport overlay container exists
+  const ensureLayer = () => {
+    if (layerEl) return layerEl;
+    const el = document.createElement('div');
+    el.id = 'tn-layer';
+    el.style.cssText =
+      'position:fixed;inset:0;pointer-events:none;z-index:2147483646;';
+    document.documentElement.appendChild(el);
+    layerEl = el;
+    return el;
   };
 
-  const q = (id) => document.getElementById(id);
+  // Ensure a single HUD element exists
+  const ensureHud = () => {
+    if (hudEl) return hudEl;
+    const el = document.createElement('div');
+    el.id = 'tn-hud';
+    el.style.cssText = [
+      'position:fixed',
+      'top:15px',
+      'right:15px',
+      'z-index:2147483646',
+      'background:linear-gradient(135deg, rgba(245,245,250,.95), rgba(255,255,255,.98))',
+      'color:#2C3E50',
+      'border:2px solid rgba(52,73,94,.15)',
+      'padding:8px 14px',
+      'border-radius:8px',
+      "font:700 13px -apple-system,system-ui,'Segoe UI',Roboto,'Helvetica Neue',Arial",
+      'pointer-events:none',
+      'box-shadow:0 4px 12px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.12)',
+      'backdrop-filter:blur(10px)'
+    ].join(';');
+    document.documentElement.appendChild(el);
+    hudEl = el;
+    return el;
+  };
 
-  const ensureStyle = () => {
-    if (q(CSS_ID)) return;
-    const css = document.createElement('style');
-    css.id = CSS_ID;
-    css.textContent = `
-      @keyframes tnbPulse {
-        0%   { opacity: .68; transform: scale(1); }
-        50%  { opacity: .92; transform: scale(1.015); }
-        100% { opacity: .70; transform: scale(1); }
-      }
-      #${ROOT_ID}{
-        position: fixed;
-        left: 0; top: 0;
-        width: 100vw; height: 100vh;
-        pointer-events: none;
-        z-index: 2147483646;
-      }
-      #${HUD_ID}{
-        position: fixed;
-        right: 14px; top: 14px;
-        z-index: 2147483647;
-        pointer-events: none;
-        padding: 8px 12px;
-        border-radius: 9px;
-        background: linear-gradient(135deg, rgba(247,248,255,.95), rgba(255,255,255,.98));
-        border: 2px solid rgba(45,55,72,.15);
-        box-shadow: 0 4px 12px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.12);
-        color: #263238;
-        font: 700 13px -apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-      }
-      .tnb-box{
-        position: absolute;
-        border: 2px solid rgba(44,62,80,0.28);
-        animation: tnbPulse 2000ms ease-in-out infinite;
-        pointer-events: none;
+  // Map severity -> overlay fill
+  const colorFor = (level) => {
+    const map = {
+      critical: 'rgba(233,30,99,0.55)',  
+      warning:  'rgba(255,107,53,0.48)', 
+      minor:    'rgba(255,167,38,0.42)'  
+    };
+    return map[level] || map.minor;
+  };
+
+  // Inject animation stylesheet once
+  const ensureAnim = () => {
+    if (document.getElementById('tn-anim')) return;
+    const style = document.createElement('style');
+    style.id = 'tn-anim';
+    style.textContent = `
+      @keyframes tnPulse {
+        0%,100% { opacity: .7; transform: scale(1); }
+        50%     { opacity: .9; transform: scale(1.02); }
       }
     `;
-    (document.head || document.documentElement).appendChild(css);
+    document.head.appendChild(style);
   };
 
-  const ensureRoot = () => {
-    let r = q(ROOT_ID);
-    if (r) return r;
-    r = document.createElement('div');
-    r.id = ROOT_ID;
-    r.setAttribute('aria-hidden', 'true');
-    document.documentElement.appendChild(r);
-    return r;
-  };
+  // Draw overlays, scaled to current viewport
+  const paintAreas = (areas, srcW, srcH) => {
+    const host = ensureLayer();
+    host.innerHTML = '';
+    if (!areas?.length || !srcW || !srcH) return;
 
-  const ensureHud = () => {
-    let hud = q(HUD_ID);
-    if (hud) return hud;
-    hud = document.createElement('div');
-    hud.id = HUD_ID;
-    document.documentElement.appendChild(hud);
-    return hud;
-  };
+    ensureAnim();
 
-  const state = {
-    payload: null,
-    resizeRAF: null,
-  };
-
-  const verdictFromPercent = (changedPct) => {
-    if (changedPct >= 35) return 'Tabnabbing likely';
-    if (changedPct >= 15) return 'Possibly tabnabbing';
-    if (changedPct > 0)  return 'Unlikely tabnabbing';
-    return 'No changes detected';
-  };
-
-  const updateHud = (mismatch) => {
-    const hud = ensureHud();
-    const changed = Math.max(0, Number(mismatch) || 0);
-    const match = Math.max(0, 100 - changed);
-
-    hud.textContent = '';
-
-    const top = document.createElement('div');
-    top.style.display = 'flex';
-    top.style.alignItems = 'center';
-    top.style.gap = '8px';
-
-    const label = document.createElement('span');
-    label.style.fontSize = '11px';
-    label.style.opacity = '0.8';
-    label.textContent = 'MATCH';
-
-    const strong = document.createElement('span');
-    strong.style.fontSize = '14px';
-    strong.style.fontWeight = '800';
-    strong.textContent = `${match.toFixed(1)}%`;
-
-    const subtle = document.createElement('span');
-    subtle.style.fontSize = '11px';
-    subtle.style.opacity = '0.72';
-    subtle.textContent = `• ${changed.toFixed(1)}% changed`;
-
-    top.appendChild(label);
-    top.appendChild(strong);
-    top.appendChild(subtle);
-
-    const verdict = document.createElement('div');
-    verdict.style.marginTop = '4px';
-    verdict.style.fontSize = '12px';
-    verdict.style.fontWeight = '700';
-    verdict.style.opacity = '.9';
-    verdict.textContent = verdictFromPercent(changed);
-
-    hud.appendChild(top);
-    hud.appendChild(verdict);
-  };
-
-  const paintRegions = (regions, srcW, srcH) => {
-    const root = ensureRoot();
-    root.innerHTML = '';
-
-    if (!Array.isArray(regions) || !regions.length || !srcW || !srcH) return;
-
-    const sx = window.innerWidth / srcW;
-    const sy = window.innerHeight / srcH;
+    const scaleX = window.innerWidth / srcW;
+    const scaleY = window.innerHeight / srcH;
 
     const frag = document.createDocumentFragment();
-    for (const r of regions) {
+    for (const a of areas) {
       const box = document.createElement('div');
-      box.className = 'tnb-box';
-      box.style.left = `${(r.x || 0) * sx}px`;
-      box.style.top = `${(r.y || 0) * sy}px`;
-      box.style.width = `${(r.w || 0) * sx}px`;
-      box.style.height = `${(r.h || 0) * sy}px`;
-      box.style.background = levelTint(r.level);
+      box.style.cssText = [
+        'position:absolute',
+        `left:${a.x * scaleX}px`,
+        `top:${a.y * scaleY}px`,
+        `width:${a.w * scaleX}px`,
+        `height:${a.h * scaleY}px`,
+        `background:${colorFor(a.level)}`,
+        'border:2px solid rgba(44,62,80,.25)',
+        'pointer-events:none',
+        'animation:tnPulse 2s ease-in-out infinite'
+      ].join(';');
       frag.appendChild(box);
     }
-    root.appendChild(frag);
+    host.appendChild(frag);
   };
 
-  const rerenderOnResize = () => {
-    if (!state.payload) return;
-    if (state.resizeRAF) cancelAnimationFrame(state.resizeRAF);
-    state.resizeRAF = requestAnimationFrame(() => {
-      const { changes, width, height } = state.payload;
-      paintRegions(changes, width, height);
-    });
+  // Update HUD with match / change percentages
+  const showHud = (mismatch) => {
+    const el = ensureHud();
+    const changed = Math.max(0, Number(mismatch) || 0);
+    const match = Math.max(0, 100 - changed);
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:11px;opacity:.8;">MATCH</span>
+        <span style="font-size:14px;font-weight:800;">${match.toFixed(1)}%</span>
+        <span style="font-size:11px;opacity:.7;">• ${changed.toFixed(1)}% changed</span>
+      </div>
+    `;
   };
 
+  // Repaint on resize using the last payload
+  const installResize = () => {
+    if (resizeUnsub) window.removeEventListener('resize', resizeUnsub);
+    let rafId = 0;
+    resizeUnsub = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        if (lastPayload) {
+          paintAreas(lastPayload.changes, lastPayload.width, lastPayload.height);
+        }
+      });
+    };
+    window.addEventListener('resize', resizeUnsub);
+  };
+
+  // Teardown everything we add
   const clearAll = () => {
-    const root = q(ROOT_ID);
-    const hud = q(HUD_ID);
-    const css = q(CSS_ID);
-
-    if (root) root.remove();
-    if (hud) hud.remove();
-    if (css) css.remove();
-
-    if (state.resizeRAF) {
-      cancelAnimationFrame(state.resizeRAF);
-      state.resizeRAF = null;
+    if (layerEl) { layerEl.remove(); layerEl = null; }
+    if (hudEl)   { hudEl.remove();   hudEl = null; }
+    if (resizeUnsub) {
+      window.removeEventListener('resize', resizeUnsub);
+      resizeUnsub = null;
     }
-    state.payload = null;
-    window.removeEventListener('resize', rerenderOnResize);
+    const style = document.getElementById('tn-anim');
+    if (style) style.remove();
+    lastPayload = null;
   };
 
+  // Wire messages from the service worker
   chrome.runtime.onMessage.addListener((msg) => {
-    const { type } = msg || {};
-    if (type === 'visualize:changes') {
-      ensureStyle();
-      state.payload = {
+    if (msg?.type === 'visualize:changes') {
+      lastPayload = {
         changes: msg.changes || [],
         width: msg.width,
-        height: msg.height,
-        mismatch: msg.mismatch || 0
+        height: msg.height
       };
-      updateHud(state.payload.mismatch);
-      paintRegions(state.payload.changes, state.payload.width, state.payload.height);
-
-      window.removeEventListener('resize', rerenderOnResize);
-      window.addEventListener('resize', rerenderOnResize);
-      return;
-    }
-
-    if (type === 'visualize:remove') {
+      showHud(msg.mismatch);
+      paintAreas(lastPayload.changes, lastPayload.width, lastPayload.height);
+      installResize();
+    } else if (msg?.type === 'visualize:remove') {
       clearAll();
-      return;
     }
   });
 })();

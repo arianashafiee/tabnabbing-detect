@@ -2,80 +2,141 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>TabNabbing Defender</title>
+  <title>TabNabbing Defender — Control</title>
   <style>
-    :root{
-      --bg1:#6366f1; --bg2:#7c3aed;
-      --card:#ffffff; --ink:#273444; --sub:#5b7083;
-      --chipCritical:#e91e63; --chipWarn:#ff6b35; --chipMinor:#ffa726; --chipSafe:#9e9e9e;
-      --ring:rgba(0,0,0,.08);
+    /* Layout & base styles */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 340px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     }
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{
-      width:300px;
-      padding:12px;
-      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
-      background:linear-gradient(135deg,var(--bg1),var(--bg2));
-      color:var(--ink);
+
+    .panel {
+      background: rgba(255,255,255,0.95);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
     }
-    .card{
-      background:var(--card);
-      border-radius:12px;
-      padding:14px;
-      box-shadow:0 10px 24px rgba(0,0,0,.18);
+
+    .header {
+      display: flex;
+      align-items: center;
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 2px solid rgba(102,126,234,0.2);
     }
-    h1{font-size:18px; font-weight:800; margin-bottom:8px;}
-    p.desc{font-size:12px; line-height:1.45; color:var(--sub); margin-bottom:12px;}
-    .group{border:1px solid var(--ring); border-radius:10px; padding:10px; margin-bottom:10px;}
-    .gtitle{font-size:12px;font-weight:800;margin-bottom:6px;letter-spacing:.2px}
-    .row{display:flex; gap:10px; align-items:center; margin:6px 0}
-    .chip{width:12px;height:12px;border-radius:4px;border:1px solid rgba(0,0,0,.15)}
-    .c-critical{background:var(--chipCritical)}
-    .c-warn{background:var(--chipWarn)}
-    .c-minor{background:var(--chipMinor)}
-    .c-safe{background:var(--chipSafe)}
-    .label{font-size:12px;color:var(--ink)}
-    .muted{font-size:11px;color:var(--sub)}
-    .btn{
-      width:100%; border:none; border-radius:10px; padding:10px 12px;
-      font-weight:800; font-size:14px; color:#fff; cursor:pointer;
-      background:linear-gradient(135deg,#6d79ff,#6b3fd8);
-      box-shadow:0 6px 16px rgba(0,0,0,.18);
-      margin-top:6px;
+
+    h1 { font-size: 18px; color: #2C3E50; font-weight: 700; }
+
+    .blurb {
+      font-size: 14px;
+      color: #546E7A;
+      line-height: 1.5;
+      margin-bottom: 16px;
     }
-    .btn:active{transform:translateY(1px)}
-    #feedback{
-      margin-top:8px; border:1px solid var(--ring); border-radius:10px;
-      padding:8px; text-align:center; font-size:12px; color:var(--sub); background:#f7f9fc;
-      min-height:32px; display:flex; align-items:center; justify-content:center;
+
+    /* Buttons */
+    .btn {
+      width: 100%;
+      padding: 12px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
-    .foot{margin-top:8px;text-align:center;font-size:11px;color:var(--sub)}
+    .btn:hover   { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+    .btn:active  { transform: translateY(0); }
+
+    #clearBtn {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: #fff;
+      margin-bottom: 10px;
+    }
+    #clearBtn:hover { background: linear-gradient(135deg, #5a67d8, #6b42a0); }
+
+    /* Feedback box */
+    #feedback {
+      margin-top: 14px;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.4;
+      text-align: center;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #feedback.info    { background: rgba(102,126,234,0.1); color: #5664D2; border: 1px solid rgba(102,126,234,0.2); }
+    #feedback.success { background: rgba(76,175,80,0.1);   color: #2E7D32; border: 1px solid rgba(76,175,80,0.2); }
+    #feedback.error   { background: rgba(244,67,54,0.1);   color: #C62828; border: 1px solid rgba(244,67,54,0.2); }
+
+    .note {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+      font-size: 11px;
+      color: #78909C;
+      text-align: center;
+    }
+
+    /* Legends (overlay & badge palettes) */
+    .group {
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 10px;
+      padding: 10px;
+      margin-top: 14px;
+      background: #fff;
+    }
+    .gtitle { font-size: 12px; font-weight: 800; margin-bottom: 6px; letter-spacing: .2px; color: #2C3E50; }
+    .row { display: flex; gap: 10px; align-items: center; margin: 6px 0; }
+    .chip { width: 12px; height: 12px; border-radius: 4px; border: 1px solid rgba(0,0,0,.15); }
+    .c-critical { background: #E91E63; }  /* critical */
+    .c-warn     { background: #FF6B35; }  /* warning  */
+    .c-minor    { background: #FFA726; }  /* minor    */
+    .label { font-size: 12px; color: #2C3E50; }
+    .muted { font-size: 11px; color: #78909C; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>TabNabbing Defender</h1>
-    <p class="desc">Background protection is active. We color the badge and draw page overlays when suspicious changes are detected.</p>
-
-    <div class="group">
-      <div class="gtitle">Badge colors — % changed (global)</div>
-      <div class="row"><span class="chip c-critical"></span><span class="label">Critical: ≥ 35%</span></div>
-      <div class="row"><span class="chip c-warn"></span><span class="label">Warning: 15–34.9%</span></div>
-      <div class="row"><span class="chip c-minor"></span><span class="label">Minor: &lt; 15%</span></div>
-      <div class="row"><span class="chip c-safe"></span><span class="label">Safe: 0%</span></div>
-      <div class="muted" style="margin-top:4px;">Badge number = count of changed regions found on the page.</div>
+  <div class="panel">
+    <div class="header">
+      <h1>TabNabbing Defender</h1>
     </div>
 
+    <p class="blurb">
+      Watches for visual shifts when a tab regains focus. If something looks off, we tint the changed
+      regions on the page and color the toolbar badge to reflect overall impact.
+    </p>
+
+    <button id="clearBtn" class="btn">Clear All Highlights</button>
+
+    <!-- Overlay legend -->
     <div class="group">
-      <div class="gtitle">Overlay colors — color difference (per-region)</div>
+      <div class="gtitle">Overlay colors — per-region color distance</div>
       <div class="row"><span class="chip c-critical"></span><span class="label">Critical: ≥ 28</span></div>
       <div class="row"><span class="chip c-warn"></span><span class="label">Warning: 12–27.9</span></div>
       <div class="row"><span class="chip c-minor"></span><span class="label">Minor: &lt; 12</span></div>
     </div>
 
-    <button id="clearBtn" class="btn">Clear Page Highlights</button>
-    <div id="feedback">Ready.</div>
-    <div class="foot">Auto-checks run on tab/window focus.</div>
+    <!-- Badge legend -->
+    <div class="group">
+      <div class="gtitle">Badge colors — global % changed</div>
+      <div class="row"><span class="chip c-critical"></span><span class="label">Critical: ≥ 35%</span></div>
+      <div class="row"><span class="chip c-warn"></span><span class="label">Warning: 15–34.9%</span></div>
+      <div class="row"><span class="chip c-minor"></span><span class="label">Minor: &lt; 15%</span></div>
+      <div class="muted" style="margin-top:4px;">Badge number shows how many changed regions were detected.</div>
+    </div>
+
+    <div id="feedback" class="info">Ready.</div>
+    <div class="note">Checks run automatically when you switch tabs.</div>
   </div>
 
   <script src="control.js"></script>

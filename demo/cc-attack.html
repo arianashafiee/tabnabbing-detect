@@ -173,53 +173,52 @@
   </div>
 
   <script>
-    // --- helpers ---
+    // --- query flags ---
     const qs = new URLSearchParams(location.search);
     const modeParam = (qs.get('mode') || 'subtle').toLowerCase(); // subtle|medium|high
     const auto = qs.get('auto') !== '0'; // default true
-    let attacked = false;
-    let lastHidden = false;
-
-    const $ = sel => document.querySelector(sel);
+  
+    // --- helpers & state ---
+    const $ = (sel) => document.querySelector(sel);
     const root = document.documentElement;
-
+  
+    let attacked = false;
+    let armedLevel = qs.has('mode') ? modeParam : null; // pre-arm via ?mode=...
+    
+    // ---------- baseline UI ----------
     function resetUI(){
       attacked = false;
       root.classList.remove('subtle','medium','high');
       $('#domain').textContent = 'https://pay.stripe.com/lattebean-checkout';
       $('.merchant').textContent = 'LatteBean Coffee';
       $('#payBtn').textContent = 'Pay $24.00';
+      $('#payBtn').style.transform = 'translateY(0)';
       $('#hint').innerHTML = 'Your payment is processed securely by Stripe.';
       $('#aside').style.borderColor = 'var(--line)';
     }
-
-    // Small DOM tweaks for subtle visual diffs (~micro changes)
+  
+    // ---------- attack variants ----------
     function attackSubtle(){
       root.classList.add('subtle');
-      // Tiny hue/spacing shift & micro text change
       $('#domain').textContent = 'https://pay.stripe.com/lattebean-checkout';
-      $('#hint').innerHTML = 'Your payment is processed <b>securely</b> by Stripe.'; // bold adds a layout nudge
-      // Move the Pay button by 1px to create measurable diff
-      $('#payBtn').style.transform = 'translateY(1px)';
+      $('#hint').innerHTML = 'Your payment is processed <b>securely</b> by Stripe.';
+      $('#payBtn').style.transform = 'translateY(1px)'; // tiny measurable diff
     }
-
     function attackMedium(){
       root.classList.add('medium');
-      $('#domain').textContent = 'https://pay.stripee.com/lattebean-checkout'; // look-alike domain
+      $('#domain').textContent = 'https://pay.stripee.com/lattebean-checkout';
       $('#hint').innerHTML = 'Verified • 256-bit encryption';
-      // Trust “color shift”
       $('#aside').style.borderColor = '#facc15';
       $('#payBtn').textContent = 'Verify & Pay $24.00';
     }
-
     function attackHigh(){
       root.classList.add('high');
-      $('.merchant').textContent = 'LatteBean Secure Portal'; // brand shift
+      $('.merchant').textContent = 'LatteBean Secure Portal';
       $('#domain').textContent = 'https://stripe-secure-pay.com/lattebean';
       $('#payBtn').textContent = 'Continue';
       $('#hint').innerHTML = '<span class="fake-note">⚠ Additional verification required</span>';
     }
-
+  
     function runAttack(level){
       if (attacked) return;
       attacked = true;
@@ -227,26 +226,49 @@
       else if (level === 'medium') attackMedium();
       else attackSubtle();
     }
-
-    // Manual buttons
-    $('#btnSubtle').addEventListener('click', () => { resetUI(); runAttack('subtle'); });
-    $('#btnMedium').addEventListener('click', () => { resetUI(); runAttack('medium'); });
-    $('#btnHigh').addEventListener('click', () => { resetUI(); runAttack('high'); });
-    $('#btnReset').addEventListener('click', () => { resetUI(); });
-
-    // Auto trigger: when user leaves and returns to the tab
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        lastHidden = true;
-      } else if (lastHidden && auto) {
-        // small delay to mimic real scripts and to let your extension capture “before”
-        setTimeout(() => runAttack(modeParam), 250);
-        lastHidden = false;
+  
+    // ---------- arming (no change yet) ----------
+    function arm(level){
+      armedLevel = level;
+      attacked = false;
+      $('#hint').innerHTML = `Armed: will simulate <b>${level.toUpperCase()}</b> after you leave this tab.`;
+    }
+  
+    // Buttons now ARM only (no immediate change)
+    $('#btnSubtle').addEventListener('click', () => { resetUI(); arm('subtle'); });
+    $('#btnMedium').addEventListener('click', () => { resetUI(); arm('medium'); });
+    $('#btnHigh').addEventListener('click',  () => { resetUI(); arm('high');   });
+    $('#btnReset').addEventListener('click', () => { resetUI(); armedLevel = null; });
+  
+    // ---------- trigger WHILE HIDDEN (before you navigate back) ----------
+    function triggerIfArmed() {
+      if (attacked) return;
+      const level = armedLevel || (auto ? modeParam : null);
+      if (!level) return;
+  
+      // Execute shortly after backgrounding; helps align with capture cadence
+      const start = () => runAttack(level);
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(start, { timeout: 1200 });
+      } else {
+        setTimeout(start, 250);
       }
+    }
+  
+    // Fire as soon as the tab goes to background
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) triggerIfArmed();
     });
-
-    // Initial state
+    // Extra hook (some environments throttle visibility events)
+    window.addEventListener('blur', triggerIfArmed);
+  
+    // ---------- boot ----------
     resetUI();
+    if (armedLevel) {
+      $('#hint').innerHTML =
+        `Armed from URL: will simulate <b>${armedLevel.toUpperCase()}</b> after you leave this tab.`;
+    }
   </script>
+  
 </body>
 </html>
