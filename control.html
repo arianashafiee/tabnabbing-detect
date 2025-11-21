@@ -1,158 +1,99 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>TabNabbing Defender Control Panel</title>
+  <meta charset="utf-8" />
+  <title>TabNabbing Defender • Control</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 340px;
-      padding: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      width: 280px; padding: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     }
-    
-    .container {
-      background: rgba(255, 255, 255, 0.95);
+    .card {
+      background: rgba(255,255,255,0.96);
       border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      padding: 14px;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.18);
     }
-    
-    .header {
-      display: flex;
-      align-items: center;
-      margin-bottom: 18px;
-      padding-bottom: 14px;
-      border-bottom: 2px solid rgba(102, 126, 234, 0.2);
-    }
-    
-    .shield-icon {
-      font-size: 24px;
-      margin-right: 12px;
-    }
-    
-    h1 {
-      font-size: 18px;
-      color: #2C3E50;
-      font-weight: 700;
-    }
-    
-    .description {
-      font-size: 14px;
-      color: #546E7A;
-      line-height: 1.5;
-      margin-bottom: 20px;
-    }
-    
-    .btn {
-      width: 100%;
-      padding: 12px 16px;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    
-    .btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
-    }
-    
-    .btn:active {
-      transform: translateY(0);
-    }
-    
-    #clearBtn {
-      background: linear-gradient(135deg, #667eea, #764ba2);
-      color: white;
+    .header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    h1 { font-size: 16px; color: #22313f; font-weight: 800; letter-spacing: .2px; }
+    .desc { font-size: 12px; color: #546E7A; line-height: 1.4; margin-bottom: 10px; }
+
+    .legend {
+      border: 1px solid rgba(0,0,0,0.08);
+      background: #FAFBFF;
+      border-radius: 10px;
+      padding: 10px;
       margin-bottom: 10px;
     }
-    
-    #clearBtn:hover {
-      background: linear-gradient(135deg, #5a67d8, #6b42a0);
+    .legend h2 {
+      font-size: 11px; font-weight: 900; color: #2C3E50; margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: .35px;
     }
-    
-    #analyzeBtn {
-      background: linear-gradient(135deg, #f093fb, #f5576c);
-      color: white;
+    .legend .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+    .item { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #37474F; }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.12); }
+
+    .btn {
+      width: 100%; padding: 10px 12px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 800; cursor: pointer;
+      background: linear-gradient(135deg, #667eea, #764ba2); color: #fff;
+      transition: transform .18s, box-shadow .18s;
     }
-    
-    #analyzeBtn:hover {
-      background: linear-gradient(135deg, #eb7ff5, #f23d54);
-    }
-    
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(0,0,0,0.14); }
+    .btn:active { transform: translateY(0); }
+
     #feedback {
-      margin-top: 14px;
-      padding: 10px;
-      border-radius: 6px;
-      font-size: 13px;
-      line-height: 1.4;
-      text-align: center;
-      min-height: 40px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      margin-top: 8px; padding: 8px; border-radius: 6px; min-height: 34px;
+      font-size: 11.5px; line-height: 1.35; text-align: center;
+      display: flex; align-items: center; justify-content: center;
     }
-    
-    #feedback.info {
-      background: rgba(102, 126, 234, 0.1);
-      color: #5664D2;
-      border: 1px solid rgba(102, 126, 234, 0.2);
-    }
-    
-    #feedback.success {
-      background: rgba(76, 175, 80, 0.1);
-      color: #2E7D32;
-      border: 1px solid rgba(76, 175, 80, 0.2);
-    }
-    
-    #feedback.error {
-      background: rgba(244, 67, 54, 0.1);
-      color: #C62828;
-      border: 1px solid rgba(244, 67, 54, 0.2);
-    }
-    
-    .feature-note {
-      margin-top: 16px;
-      padding-top: 14px;
-      border-top: 1px solid rgba(0, 0, 0, 0.08);
-      font-size: 11px;
-      color: #78909C;
-      text-align: center;
-    }
+    #feedback.info { background: rgba(102,126,234,0.08); color: #3d4fb7; border: 1px solid rgba(102,126,234,0.22); }
+    #feedback.success { background: rgba(76,175,80,0.10); color: #256029; border: 1px solid rgba(76,175,80,0.20); }
+    #feedback.error { background: rgba(244,67,54,0.10); color: #b71c1c; border: 1px solid rgba(244,67,54,0.20); }
+
+    .note { margin-top: 6px; text-align: center; font-size: 10.5px; color: #7b8a95; }
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="card">
     <div class="header">
       <h1>TabNabbing Defender</h1>
     </div>
-    
-    <p class="description">
-      Protects against tabnabbing phishing attacks by monitoring visual changes when tabs regain focus. 
-      Suspicious changes are highlighted directly on the page.
+
+    <p class="desc">
+      Background protection is active. We color the badge and draw page overlays when suspicious changes are detected.
     </p>
-    
-    <button id="clearBtn" class="btn">Clear All Highlights</button>
-    <button id="analyzeBtn" class="btn">Analyze Tab Now</button>
-    
-    <div id="feedback"></div>
-    
-    <div class="feature-note">
-      Auto-detection runs when switching between tabs
+
+    <!-- Badge legend (global % changed -> badge color) -->
+    <div class="legend" aria-label="Badge color legend">
+      <h2>Badge Colors — % Changed (Global)</h2>
+      <div class="row">
+        <div class="item"><span class="swatch" style="background:#E91E63;"></span>Critical: ≥ 35%</div>
+        <div class="item"><span class="swatch" style="background:#FF6B35;"></span>Warning: 15–34.9%</div>
+        <div class="item"><span class="swatch" style="background:#FFA726;"></span>Minor: &lt; 15%</div>
+        <div class="item"><span class="swatch" style="background:#9E9E9E;"></span>Safe: 0%</div>
+      </div>
     </div>
+
+    <!-- Overlay legend (per-region ΔE thresholds -> overlay color) -->
+    <div class="legend" aria-label="Overlay color legend">
+      <h2>Overlay Colors — ΔE (Per-Region)</h2>
+      <div class="row">
+        <div class="item"><span class="swatch" style="background:#E91E63;"></span>Critical: ΔE ≥ 28</div>
+        <div class="item"><span class="swatch" style="background:#FF6B35;"></span>Warning: 12 ≤ ΔE &lt; 28</div>
+        <div class="item"><span class="swatch" style="background:#FFA726;"></span>Minor: ΔE &lt; 12</div>
+      </div>
+    </div>
+
+    <!-- Single action -->
+    <button id="clearBtn" class="btn">Clear Page Highlights</button>
+
+    <div id="feedback" class="info" role="status" aria-live="polite">Ready.</div>
+    <div class="note">Auto-checks run on tab/window focus.</div>
   </div>
-  
+
   <script src="control.js"></script>
 </body>
 </html>
