@@ -1,298 +1,362 @@
-// Screenshot capture coordinator, comparison orchestrator, and alert system
+// monitor.js — Screenshot capture coordinator, comparison orchestrator, and alert system
 
-const CAPTURE_INTERVAL = 3500;        // Screenshot interval in milliseconds  
-const COMPARISON_DELAY = 150;         // Delay before comparison after tab return
-const restrictedUrls = ["chrome://", "chrome-extension://", "edge://", "about:", "devtools://"];
+// ------------------------------
+// Tunables
+// ------------------------------
+const SNAPSHOT_EVERY_MS = 3500;        // cadence while a tab is active
+const COMPARE_AFTER_FOCUS_MS = 150;    // small settle delay after activation
+const MIN_GAP_BETWEEN_CAPTURES_MS = 800; // throttle per-window capture calls
 
-const tabMonitor = new Map(); // tabId -> { snapshot: dataUrl|null, isActive: boolean, captureLoop?: number }
+// A more expansive “don’t try to capture these” list.
+const BLOCKED_SCHEMES = [
+  'chrome://',
+  'chrome-untrusted://',
+  'chrome-extension://',
+  'edge://',
+  'devtools://',
+  'about:',
+  'brave://',
+  'opera://',
+  'vivaldi://',
+  'moz-extension://',
+  'resource://'
+];
 
-// === Utility Functions ===
-function isRestrictedUrl(url) {
-  return !url || restrictedUrls.some(prefix => url.startsWith(prefix));
-}
+// Badge palette
+const BADGE_COLOR = {
+  safe:    '#9E9E9E',
+  minor:   '#FFA726',
+  warning: '#FF6B35',
+  critical:'#E91E63'
+};
 
-async function retrieveTab(tabId) {
-  try { 
-    return await chrome.tabs.get(tabId); 
-  } catch { 
-    return null; 
+// ------------------------------
+// In-memory state
+// ------------------------------
+
+/** tabId -> { baseline: dataURL|null, active: boolean, timer?: number } */
+const tabState = new Map();
+/** windowId -> { last: number } */
+const windowThrottle = new Map();
+
+let seq = 1; // unique ticket ids for analyzer requests
+
+// ------------------------------
+// Small utilities
+// ------------------------------
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+const isBlockedUrl = (url) => {
+  if (!url || typeof url !== 'string') return true;
+  return BLOCKED_SCHEMES.some(prefix => url.startsWith(prefix));
+};
+
+const getTab = async (tabId) => {
+  try { return await chrome.tabs.get(tabId); }
+  catch { return null; }
+};
+
+const touchThrottle = async (windowId) => {
+  const now = Date.now();
+  const info = windowThrottle.get(windowId) || { last: 0 };
+  const gap = now - info.last;
+  if (gap < MIN_GAP_BETWEEN_CAPTURES_MS) {
+    await delay(MIN_GAP_BETWEEN_CAPTURES_MS - gap);
   }
-}
+  info.last = Date.now();
+  windowThrottle.set(windowId, info);
+};
 
-async function captureScreenshot(tabId) {
-  const tab = await retrieveTab(tabId);
-  if (!tab || !tab.active || isRestrictedUrl(tab.url)) return null;
-  
+// Gate + capture as visible tab PNG
+const captureActiveView = async (tabId) => {
+  const t = await getTab(tabId);
+  if (!t || !t.active || isBlockedUrl(t.url)) return null;
+
   try {
-    return await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    await touchThrottle(t.windowId);
+    return await chrome.tabs.captureVisibleTab(t.windowId, { format: 'png' });
   } catch (err) {
-    const errorMsg = String(err?.message || "").toLowerCase();
-    const expectedErrors = ["cannot access", "cannot be edited", "not in effect", "no tab with id", "dragging"];
-    
-    if (!expectedErrors.some(e => errorMsg.includes(e))) {
-      console.warn("[captureScreenshot] Unexpected error:", err.message);
+    const msg = String(err?.message || '').toLowerCase();
+    const benign = [
+      'permission',
+      'cannot access',
+      'not currently in effect',
+      'no tab with id',
+      'dragging',
+      'readback',
+      'page crashed',
+      'frame detached'
+    ];
+    if (!benign.some(h => msg.includes(h))) {
+      console.warn('[defender-bg] capture issue:', err.message);
     }
     return null;
   }
-}
+};
 
-function haltCapturing(tabId) {
-  const monitor = tabMonitor.get(tabId);
-  if (monitor?.captureLoop) {
-    clearInterval(monitor.captureLoop);
-    monitor.captureLoop = undefined;
+// Calculate coarse threat tier from percent mismatch
+const classify = (percent) =>
+  percent >= 35 ? 'critical' :
+  percent >= 15 ? 'warning'  :
+                  'minor';
+
+// ------------------------------
+// Periodic snapshot management
+// ------------------------------
+const stopTimer = (tabId) => {
+  const st = tabState.get(tabId);
+  if (st?.timer) {
+    clearInterval(st.timer);
+    st.timer = undefined;
   }
-}
+};
 
-function initiateCapturing(tabId) {
-  haltCapturing(tabId);
-  const monitor = tabMonitor.get(tabId) ?? { snapshot: null, isActive: true };
-  
-  monitor.captureLoop = setInterval(async () => {
-    if (!monitor.isActive) return;
-    const screenshot = await captureScreenshot(tabId);
-    if (screenshot) monitor.snapshot = screenshot;
-  }, CAPTURE_INTERVAL);
-  
-  tabMonitor.set(tabId, monitor);
-}
+const startTimer = (tabId) => {
+  stopTimer(tabId);
+  const st = tabState.get(tabId) || { baseline: null, active: true };
+  st.timer = setInterval(async () => {
+    if (!st.active) return;
+    const snap = await captureActiveView(tabId);
+    if (snap) st.baseline = snap;
+  }, SNAPSHOT_EVERY_MS);
+  tabState.set(tabId, st);
+};
 
-// === Offscreen Document Management ===
-async function isOffscreenActive() {
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
-  });
-  return contexts.some(ctx => ctx.documentUrl.endsWith("analyzer.html"));
-}
+// ------------------------------
+// Offscreen analyzer coordination
+// ------------------------------
+const ensureAnalyzer = async () => {
+  try {
+    if (chrome.runtime.getContexts) {
+      const ctxs = await chrome.runtime.getContexts({
+        contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
+      });
+      const exists = ctxs.some(c => c.documentUrl.endsWith('analyzer.html'));
+      if (exists) return;
+    }
+  } catch (_) {}
 
-async function activateOffscreen() {
-  if (await isOffscreenActive()) return;
-  await chrome.offscreen.createDocument({
-    url: "analyzer.html",
-    reasons: [chrome.offscreen.Reason.DOM_PARSER],
-    justification: "Canvas-based image difference analysis for tabnabbing detection."
-  });
-}
+  try {
+    await chrome.offscreen.createDocument({
+      url: 'analyzer.html',
+      reasons: [chrome.offscreen.Reason.DOM_PARSER],
+      justification: 'Image diff analysis using canvas in an offscreen document'
+    });
+  } catch (e) {
+    const msg = String(e?.message || '').toLowerCase();
+    if (!msg.includes('already exists') && !msg.includes('only a single')) {
+      throw e;
+    }
+  }
+};
 
-function calculateThreatLevel(mismatchPercent) {
-  return mismatchPercent >= 35 ? "critical" : 
-         mismatchPercent >= 15 ? "warning" : "minor";
-}
+const analyzePair = async (tabId, beforeDataUrl, afterDataUrl) => {
+  await ensureAnalyzer();
+  const ticket = `req_${Date.now()}_${seq++}`;
 
-async function analyzeImages(tabId, original, current) {
-  await activateOffscreen();
-  
   return new Promise((resolve) => {
-    const messageHandler = (msg, sender) => {
-      if (msg?.type === "analysis:complete" && msg.tabId === tabId) {
-        chrome.runtime.onMessage.removeListener(messageHandler);
+    const onMsg = (msg) => {
+      if (msg?.type === 'analysis:complete' && msg.tabId === tabId && msg.ticket === ticket) {
+        chrome.runtime.onMessage.removeListener(onMsg);
         resolve(msg);
       }
     };
-    
-    chrome.runtime.onMessage.addListener(messageHandler);
+    chrome.runtime.onMessage.addListener(onMsg);
+
     chrome.runtime.sendMessage({
-      type: "analysis:request",
+      type: 'analysis:request',
+      ticket,
       tabId,
-      original,
-      current
+      original: beforeDataUrl,
+      current: afterDataUrl
     });
   });
-}
+};
 
-// === Tab Return Analysis ===
-async function analyzeTabReturn(tabId) {
-  const monitor = tabMonitor.get(tabId);
-  if (!monitor?.snapshot) return;
-  
+// ------------------------------
+// Compare on tab return
+// ------------------------------
+const compareAfterActivation = async (tabId) => {
+  const st = tabState.get(tabId);
+  if (!st?.baseline) return;
+
   setTimeout(async () => {
-    const currentCapture = await captureScreenshot(tabId);
-    if (!currentCapture) return;
-    
+    const current = await captureActiveView(tabId);
+    if (!current) return;
+
     try {
-      const analysis = await analyzeImages(tabId, monitor.snapshot, currentCapture);
-      const { mismatch, changes, width, height } = analysis || {};
-      const threatLevel = calculateThreatLevel(mismatch || 0);
-      
-      // Update extension badge with threat indicator
-      const badgeColors = {
-        critical: '#E91E63',  // Magenta-pink
-        warning: '#FF6B35',   // Orange-red  
-        minor: '#FFA726',     // Amber
-        safe: '#9E9E9E'       // Gray
-      };
-      
-      chrome.action.setBadgeBackgroundColor({ 
-        color: badgeColors[threatLevel] || badgeColors.safe, 
-        tabId 
+      const { mismatch = 0, changes = [], width = 0, height = 0 } =
+        await analyzePair(tabId, st.baseline, current) || {};
+
+      const tier = classify(mismatch);
+
+      await chrome.action.setBadgeBackgroundColor({
+        tabId,
+        color: BADGE_COLOR[tier] || BADGE_COLOR.safe
       });
-      
-      chrome.action.setBadgeText({ 
-        text: String(changes?.length || 0) || '', 
-        tabId 
+      await chrome.action.setBadgeText({
+        tabId,
+        text: String(changes.length || 0)
       });
-      
-      // Send visualization data to content script
+
       await chrome.tabs.sendMessage(tabId, {
-        type: "visualize:changes",
+        type: 'visualize:changes',
         mismatch,
         changes,
         width,
         height
       });
-      
-      // Update stored snapshot
-      monitor.snapshot = currentCapture;
-      tabMonitor.set(tabId, monitor);
-      
-    } catch (err) {
-      console.warn("[analyzeTabReturn]", err?.message || err);
-    }
-  }, COMPARISON_DELAY);
-}
 
-// === Tab and Window Event Handlers ===
+      st.baseline = current;
+      tabState.set(tabId, st);
+    } catch (e) {
+      console.warn('[defender-bg] analysis failed:', e?.message || e);
+    }
+  }, COMPARE_AFTER_FOCUS_MS);
+};
+
+// ------------------------------
+// Tab/window event wiring
+// ------------------------------
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  const existingMonitor = tabMonitor.get(tabId);
-  const wasInactive = existingMonitor ? existingMonitor.isActive === false : false;
-  
-  // Deactivate all other tabs
-  for (const [id, monitor] of tabMonitor.entries()) {
-    if (id !== tabId) monitor.isActive = false;
+  for (const [id, state] of tabState.entries()) {
+    state.active = (id === tabId);
+    if (!state.active) stopTimer(id);
   }
-  
-  // Activate current tab
-  const currentMonitor = existingMonitor ?? { snapshot: null, isActive: true };
-  currentMonitor.isActive = true;
-  tabMonitor.set(tabId, currentMonitor);
-  
-  // Stop capturing for inactive tabs
-  const allTabs = await chrome.tabs.query({ windowId });
-  for (const tab of allTabs) {
-    if (tab.id !== tabId) haltCapturing(tab.id);
+
+  const st = tabState.get(tabId) || { baseline: null, active: true };
+  st.active = true;
+  tabState.set(tabId, st);
+
+  const siblings = await chrome.tabs.query({ windowId });
+  for (const t of siblings) {
+    if (t.id !== tabId) stopTimer(t.id);
   }
-  
-  initiateCapturing(tabId);
-  
-  if (wasInactive) {
-    await analyzeTabReturn(tabId);
-  }
+
+  startTimer(tabId);
+  compareAfterActivation(tabId);
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    for (const monitor of tabMonitor.values()) {
-      monitor.isActive = false;
-    }
+    for (const st of tabState.values()) st.active = false;
     return;
   }
-  
+
   const [activeTab] = await chrome.tabs.query({ active: true, windowId });
   if (!activeTab?.id) return;
-  
-  const existingMonitor = tabMonitor.get(activeTab.id) ?? { snapshot: null, isActive: false };
-  const wasInactive = existingMonitor.isActive === false;
-  
-  // Deactivate other tabs in window
-  const windowTabs = await chrome.tabs.query({ windowId });
-  for (const tab of windowTabs) {
-    if (tab.id !== activeTab.id) {
-      const tabMon = tabMonitor.get(tab.id);
-      if (tabMon) tabMon.isActive = false;
+
+  const current = tabState.get(activeTab.id) || { baseline: null, active: false };
+  current.active = true;
+  tabState.set(activeTab.id, current);
+
+  const peers = await chrome.tabs.query({ windowId });
+  for (const t of peers) {
+    if (t.id !== activeTab.id) {
+      const peer = tabState.get(t.id);
+      if (peer) peer.active = false;
+      stopTimer(t.id);
     }
   }
-  
-  existingMonitor.isActive = true;
-  tabMonitor.set(activeTab.id, existingMonitor);
-  initiateCapturing(activeTab.id);
-  
-  if (wasInactive) {
-    await analyzeTabReturn(activeTab.id);
-  }
+
+  startTimer(activeTab.id);
+  compareAfterActivation(activeTab.id);
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (changeInfo.status === "complete" && tab.active && !isRestrictedUrl(tab.url)) {
-    const monitor = tabMonitor.get(tabId) ?? { snapshot: null, isActive: true };
-    monitor.isActive = true;
-    tabMonitor.set(tabId, monitor);
-    initiateCapturing(tabId);
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.status === 'complete' && tab?.active && !isBlockedUrl(tab.url)) {
+    const st = tabState.get(tabId) || { baseline: null, active: true };
+    st.active = true;
+    tabState.set(tabId, st);
+    startTimer(tabId);
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  haltCapturing(tabId);
-  tabMonitor.delete(tabId);
+  stopTimer(tabId);
+  tabState.delete(tabId);
 });
 
-// === Extension Installation ===
+// ------------------------------
+// First install bootstrap
+// ------------------------------
 chrome.runtime.onInstalled.addListener(async () => {
-  const activeTabs = await chrome.tabs.query({ active: true });
-  for (const tab of activeTabs) {
-    const initialCapture = await captureScreenshot(tab.id);
-    tabMonitor.set(tab.id, { 
-      snapshot: initialCapture, 
-      isActive: true 
-    });
-    initiateCapturing(tab.id);
+  const actives = await chrome.tabs.query({ active: true });
+  for (const t of actives) {
+    const snap = await captureActiveView(t.id);
+    tabState.set(t.id, { baseline: snap, active: true });
+    startTimer(t.id);
   }
 });
 
-// === Manual Check from Popup ===
-chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
-  if (msg?.type === "manual:check" && typeof msg.tabId === "number") {
-    const tabId = msg.tabId;
-    let monitor = tabMonitor.get(tabId);
-    
-    if (!monitor) {
-      monitor = { snapshot: null, isActive: true };
-      tabMonitor.set(tabId, monitor);
-    }
-    
-    try {
-      const beforeImg = monitor.snapshot ?? await captureScreenshot(tabId);
-      const afterImg = await captureScreenshot(tabId);
-      
-      if (!beforeImg || !afterImg) {
-        sendResponse({ success: false, error: "capture-failed" });
-        return true;
+// ------------------------------
+// Messages from popup / content
+// ------------------------------
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Manual baseline
+  if (msg?.type === 'manual:baseline' && typeof msg.tabId === 'number') {
+    (async () => {
+      const snap = await captureActiveView(msg.tabId);
+      if (!snap) {
+        sendResponse({ ok: false, error: 'baseline-failed' });
+        return;
       }
-      
-      const analysis = await analyzeImages(tabId, beforeImg, afterImg);
-      const { mismatch, changes, width, height } = analysis || {};
-      const threatLevel = calculateThreatLevel(mismatch || 0);
-      
-      const badgeColors = {
-        critical: '#E91E63',
-        warning: '#FF6B35',
-        minor: '#FFA726',
-        safe: '#9E9E9E'
-      };
-      
-      chrome.action.setBadgeBackgroundColor({ 
-        color: badgeColors[threatLevel] || badgeColors.safe, 
-        tabId 
-      });
-      chrome.action.setBadgeText({ 
-        text: String(changes?.length || 0) || '', 
-        tabId 
-      });
-      
-      await chrome.tabs.sendMessage(tabId, {
-        type: "visualize:changes",
-        mismatch,
-        changes,
-        width,
-        height
-      });
-      
-      monitor.snapshot = afterImg;
-      tabMonitor.set(tabId, monitor);
-      sendResponse({ success: true });
-      
-    } catch (err) {
-      sendResponse({ success: false, error: String(err?.message || err) });
-    }
+      const st = tabState.get(msg.tabId) || { baseline: null, active: true };
+      st.baseline = snap;
+      tabState.set(msg.tabId, st);
+
+      await chrome.action.setBadgeBackgroundColor({ tabId: msg.tabId, color: BADGE_COLOR.safe });
+      await chrome.action.setBadgeText({ tabId: msg.tabId, text: '•' });
+
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  // Manual check
+  if (msg?.type === 'manual:check' && typeof msg.tabId === 'number') {
+    (async () => {
+      const st = tabState.get(msg.tabId) || { baseline: null, active: true };
+      const beforeImg = st.baseline ?? await captureActiveView(msg.tabId);
+      const afterImg  = await captureActiveView(msg.tabId);
+
+      if (!beforeImg || !afterImg) {
+        sendResponse({ success: false, error: 'capture-failed' });
+        return;
+      }
+
+      try {
+        const { mismatch = 0, changes = [], width = 0, height = 0 } =
+          await analyzePair(msg.tabId, beforeImg, afterImg) || {};
+
+        const tier = classify(mismatch);
+
+        await chrome.action.setBadgeBackgroundColor({
+          tabId: msg.tabId,
+          color: BADGE_COLOR[tier] || BADGE_COLOR.safe
+        });
+        await chrome.action.setBadgeText({
+          tabId: msg.tabId,
+          text: String(changes.length || 0)
+        });
+
+        await chrome.tabs.sendMessage(msg.tabId, {
+          type: 'visualize:changes',
+          mismatch,
+          changes,
+          width,
+          height
+        });
+
+        const keep = tabState.get(msg.tabId) || { baseline: null, active: true };
+        keep.baseline = afterImg;
+        tabState.set(msg.tabId, keep);
+
+        sendResponse({ success: true });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e?.message || e) });
+      }
+    })();
     return true;
   }
 });

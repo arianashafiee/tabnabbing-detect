@@ -1,380 +1,224 @@
-/* monitor.js
- * Background service worker:
- * - Periodically snapshots the active tab (baseline)
- * - When a tab regains focus, compares current view vs. last baseline via an offscreen analyzer
- * - Sends drawing instructions to the content script and updates the action badge
- * - Supports manual “baseline now” and “check now” messages from the popup
- */
+// analyzer.js — Offscreen document. No chrome.tabs.* API here.
+// Receives: { type:"analysis:request", ticket, tabId, original, current }
+// Replies:  { type:"analysis:complete", ticket, tabId, mismatch, changes[], width, height }
 
-// ------------------------------
-// Tunables
-// ------------------------------
-const SNAPSHOT_EVERY_MS = 3500;  // cadence while a tab is active
-const COMPARE_AFTER_FOCUS_MS = 150; // small settle delay after activation
-const MIN_GAP_BETWEEN_CAPTURES_MS = 800; // throttle per-window capture calls
-
-// A more expansive “don’t try to capture these” list.
-// (Schemes & chrome-like internal pages where capture is not possible/meaningful.)
-const BLOCKED_SCHEMES = [
-  'chrome://',
-  'chrome-untrusted://',
-  'chrome-extension://',
-  'edge://',
-  'devtools://',
-  'about:',
-  'brave://',
-  'opera://',
-  'vivaldi://',
-  'moz-extension://',
-  'resource://'
-];
-
-// Badge palette (keep consistent with your popup legend)
-const BADGE_COLOR = {
-  safe:    '#9E9E9E', // neutral gray
-  minor:   '#FFA726', // amber
-  warning: '#FF6B35', // orange-red
-  critical:'#E91E63'  // pink-red
-};
-
-// ------------------------------
-// In-memory state
-// ------------------------------
-
-// Per-tab state
-// tabId -> { baseline: dataURL|null, active: boolean, timer?: number }
-const tabState = new Map();
-
-// Per-window throttling (avoid capture quota errors)
-const windowThrottle = new Map(); // windowId -> { last: number }
-
-// Simple unique id counter for offscreen requests
-let seq = 1;
-
-// ------------------------------
-// Small utilities
-// ------------------------------
-const delay = (ms) => new Promise(r => setTimeout(r, ms));
-
-const isBlockedUrl = (url) => {
-  if (!url || typeof url !== 'string') return true;
-  return BLOCKED_SCHEMES.some(prefix => url.startsWith(prefix));
-};
-
-const getTab = async (tabId) => {
-  try { return await chrome.tabs.get(tabId); }
-  catch { return null; }
-};
-
-const touchThrottle = async (windowId) => {
-  const now = Date.now();
-  const info = windowThrottle.get(windowId) || { last: 0 };
-  const gap = now - info.last;
-
-  if (gap < MIN_GAP_BETWEEN_CAPTURES_MS) {
-    await delay(MIN_GAP_BETWEEN_CAPTURES_MS - gap);
-  }
-
-  info.last = Date.now();
-  windowThrottle.set(windowId, info);
-};
-
-// Gate + capture as visible tab PNG
-const captureActiveView = async (tabId) => {
-  const t = await getTab(tabId);
-  if (!t || !t.active || isBlockedUrl(t.url)) return null;
-
-  try {
-    await touchThrottle(t.windowId);
-    return await chrome.tabs.captureVisibleTab(t.windowId, { format: 'png' });
-  } catch (err) {
-    const msg = String(err?.message || '').toLowerCase();
-    // Known, non-fatal capture hiccups we ignore
-    const benign = [
-      'permission',                 // permission not available yet
-      'cannot access',              // page mid-navigation / no access
-      'not currently in effect',    // transient
-      'no tab with id',             // tab disappeared
-      'dragging',                   // window/tab dragging
-      'readback',                   // gpu readback error
-      'page crashed',               // renderer crash
-      'frame detached'              // navigation race
-    ];
-    if (!benign.some(h => msg.includes(h))) {
-      console.warn('[defender-bg] capture issue:', err.message);
-    }
-    return null;
-  }
-};
-
-// Calculate coarse threat tier from percent mismatch
-const classify = (percent) =>
-  percent >= 35 ? 'critical' :
-  percent >= 15 ? 'warning'  :
-                  'minor';
-
-// ------------------------------
-// Periodic snapshot management
-// ------------------------------
-const stopTimer = (tabId) => {
-  const st = tabState.get(tabId);
-  if (st?.timer) {
-    clearInterval(st.timer);
-    st.timer = undefined;
-  }
-};
-
-const startTimer = (tabId) => {
-  stopTimer(tabId);
-  const st = tabState.get(tabId) || { baseline: null, active: true };
-  st.timer = setInterval(async () => {
-    if (!st.active) return;
-    const snap = await captureActiveView(tabId);
-    if (snap) st.baseline = snap;
-  }, SNAPSHOT_EVERY_MS);
-  tabState.set(tabId, st);
-};
-
-// ------------------------------
-// Offscreen analyzer coordination
-// ------------------------------
-const ensureAnalyzer = async () => {
-  // Avoid duplicate offscreen documents
-  const ctxs = await chrome.runtime.getContexts({
-    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
-  });
-  const exists = ctxs.some(c => c.documentUrl.endsWith('analyzer.html'));
-  if (exists) return;
-
-  await chrome.offscreen.createDocument({
-    url: 'analyzer.html',
-    reasons: [chrome.offscreen.Reason.DOM_PARSER],
-    justification: 'Image diff analysis using canvas in an offscreen document'
-  });
-};
-
-const analyzePair = async (tabId, beforeDataUrl, afterDataUrl) => {
-  await ensureAnalyzer();
-
-  const ticket = `req_${Date.now()}_${seq++}`;
-
-  return new Promise((resolve) => {
-    const onMsg = (msg) => {
-      if (msg?.type === 'analysis:complete' && msg.tabId === tabId && msg.ticket === ticket) {
-        chrome.runtime.onMessage.removeListener(onMsg);
-        resolve(msg);
-      }
-    };
-    chrome.runtime.onMessage.addListener(onMsg);
-
-    chrome.runtime.sendMessage({
-      type: 'analysis:request',
-      ticket,
-      tabId,
-      original: beforeDataUrl,
-      current: afterDataUrl
+(() => {
+  // --- helpers ---
+  const loadImage = (src) =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Image load error'));
+      img.crossOrigin = 'anonymous';
+      img.src = src;
     });
-  });
-};
 
-// ------------------------------
-// Compare on tab return
-// ------------------------------
-const compareAfterActivation = async (tabId) => {
-  const st = tabState.get(tabId);
-  if (!st?.baseline) return; // nothing to compare against
+  const createCanvas = (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+  };
 
-  setTimeout(async () => {
-    const current = await captureActiveView(tabId);
-    if (!current) return;
+  // Level mapping used by overlays (per-region mean color distance)
+  const levelFromDelta = (avgDelta) =>
+    avgDelta >= 28 ? 'critical' :
+    avgDelta >= 12 ? 'warning'  : 'minor';
+
+  // Main: build a binary mask of changed pixels, then CC-label to boxes
+  function diffToRegions(img1Data, img2Data, width, height) {
+    const a = img1Data.data;
+    const b = img2Data.data;
+
+    // Thresholds tuned to resemble-like sensitivity
+    const DIFF_THRESHOLD = 22;              // per-pixel average RGB delta to count as "changed"
+    const MIN_REGION_AREA = Math.max(24, (width * height) / 10000 | 0); // adaptive floor
+    const MAX_REGIONS = 50;                 // safety cap
+
+    const total = width * height;
+    const mask = new Uint8Array(total);     // 1 = changed
+    let changedCount = 0;
+
+    // Build mask
+    for (let i = 0, p = 0; i < total; i++, p += 4) {
+      const dr = Math.abs(a[p]   - b[p]);
+      const dg = Math.abs(a[p+1] - b[p+1]);
+      const db = Math.abs(a[p+2] - b[p+2]);
+      const da = Math.abs(a[p+3] - b[p+3]); // rarely needed, but keep for transparency jumps
+
+      const avg = (dr + dg + db) / 3;
+      if (avg >= DIFF_THRESHOLD || (da > 25 && avg > 8)) {
+        mask[i] = 1;
+        changedCount++;
+      }
+    }
+
+    // Connected components (4-neighbor BFS)
+    const visited = new Uint8Array(total);
+    const qx = new Int32Array(total);
+    const qy = new Int32Array(total);
+
+    const regions = [];
+    const pushRegion = (x0, y0, x1, y1, sumDelta, nPix) => {
+      const w = x1 - x0 + 1;
+      const h = y1 - y0 + 1;
+      if (w <= 0 || h <= 0) return;
+      if (w * h < MIN_REGION_AREA) return;
+      const avgDelta = sumDelta / Math.max(1, nPix);
+      regions.push({ x: x0, y: y0, w, h, level: levelFromDelta(avgDelta) });
+    };
+
+    const idx = (x, y) => y * width + x;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = idx(x, y);
+        if (!mask[i] || visited[i]) continue;
+
+        let rmin = x, rmax = x, tmin = y, tmax = y;
+        let front = 0, back = 0;
+        let sumDelta = 0, nPix = 0;
+
+        visited[i] = 1;
+        qx[back] = x; qy[back] = y; back++;
+
+        while (front !== back) {
+          const cx = qx[front];
+          const cy = qy[front];
+          front++;
+
+          const pi = idx(cx, cy) * 4;
+          const dr = Math.abs(a[pi]   - b[pi]);
+          const dg = Math.abs(a[pi+1] - b[pi+1]);
+          const db = Math.abs(a[pi+2] - b[pi+2]);
+          sumDelta += (dr + dg + db) / 3;
+          nPix++;
+
+          if (cx < rmin) rmin = cx; if (cx > rmax) rmax = cx;
+          if (cy < tmin) tmin = cy; if (cy > tmax) tmax = cy;
+
+          // neighbors
+          if (cx > 0) {
+            const ni = idx(cx - 1, cy);
+            if (mask[ni] && !visited[ni]) { visited[ni] = 1; qx[back] = cx - 1; qy[back] = cy; back++; }
+          }
+          if (cx + 1 < width) {
+            const ni = idx(cx + 1, cy);
+            if (mask[ni] && !visited[ni]) { visited[ni] = 1; qx[back] = cx + 1; qy[back] = cy; back++; }
+          }
+          if (cy > 0) {
+            const ni = idx(cx, cy - 1);
+            if (mask[ni] && !visited[ni]) { visited[ni] = 1; qx[back] = cx; qy[back] = cy - 1; back++; }
+          }
+          if (cy + 1 < height) {
+            const ni = idx(cx, cy + 1);
+            if (mask[ni] && !visited[ni]) { visited[ni] = 1; qx[back] = cx; qy[back] = cy + 1; back++; }
+          }
+
+          // guard (avoid pathological explosions)
+          if (regions.length > MAX_REGIONS) break;
+        }
+
+        pushRegion(rmin, tmin, rmax, tmax, sumDelta, nPix);
+        if (regions.length > MAX_REGIONS) break;
+      }
+      if (regions.length > MAX_REGIONS) break;
+    }
+
+    // (optional) merge very close boxes to reduce fragmentation
+    const merged = mergeNearbyBoxes(regions, 6);
+    const mismatch = (changedCount / total) * 100;
+
+    return { regions: merged, mismatch };
+  }
+
+  function mergeNearbyBoxes(boxes, pad = 4) {
+    if (boxes.length <= 1) return boxes.slice();
+    const out = [];
+    const used = new Array(boxes.length).fill(false);
+
+    const overlaps = (a, b) => {
+      const ax1 = a.x - pad, ay1 = a.y - pad, ax2 = a.x + a.w + pad, ay2 = a.y + a.h + pad;
+      const bx1 = b.x,       by1 = b.y,       bx2 = b.x + b.w,       by2 = b.y + b.h;
+      return !(bx1 > ax2 || bx2 < ax1 || by1 > ay2 || by2 < ay1);
+    };
+
+    for (let i = 0; i < boxes.length; i++) {
+      if (used[i]) continue;
+      let cur = { ...boxes[i] };
+      used[i] = true;
+
+      let merged = true;
+      while (merged) {
+        merged = false;
+        for (let j = i + 1; j < boxes.length; j++) {
+          if (used[j]) continue;
+          if (overlaps(cur, boxes[j])) {
+            // merge bounds; level = max severity
+            const nx = Math.min(cur.x, boxes[j].x);
+            const ny = Math.min(cur.y, boxes[j].y);
+            const nx2 = Math.max(cur.x + cur.w, boxes[j].x + boxes[j].w);
+            const ny2 = Math.max(cur.y + cur.h, boxes[j].y + boxes[j].h);
+            cur.x = nx; cur.y = ny; cur.w = nx2 - nx; cur.h = ny2 - ny;
+            cur.level = maxLevel(cur.level, boxes[j].level);
+            used[j] = true;
+            merged = true;
+          }
+        }
+      }
+      out.push(cur);
+    }
+    return out;
+  }
+
+  function maxLevel(a, b) {
+    const rank = { minor: 0, warning: 1, critical: 2 };
+    return (rank[b] > rank[a]) ? b : a;
+  }
+
+  // Handle messages
+  chrome.runtime.onMessage.addListener(async (msg) => {
+    if (msg?.type !== 'analysis:request') return;
+
+    const { ticket, tabId, original, current } = msg;
 
     try {
-      const { mismatch = 0, changes = [], width = 0, height = 0 } =
-        await analyzePair(tabId, st.baseline, current) || {};
+      // Load both images and scale to same size (like Resemble's scaleToSameSize)
+      const [im1, im2] = await Promise.all([loadImage(original), loadImage(current)]);
+      const width  = Math.max(im1.naturalWidth || im1.width || 0, im2.naturalWidth || im2.width || 0);
+      const height = Math.max(im1.naturalHeight || im1.height || 0, im2.naturalHeight || im2.height || 0);
 
-      const tier = classify(mismatch);
+      if (!width || !height) throw new Error('invalid-dimensions');
 
-      // Update badge (color + number of changed regions)
-      await chrome.action.setBadgeBackgroundColor({
+      const c1 = createCanvas(width, height);
+      const c2 = createCanvas(width, height);
+      c1.getContext('2d').drawImage(im1, 0, 0, width, height);
+      c2.getContext('2d').drawImage(im2, 0, 0, width, height);
+
+      const d1 = c1.getContext('2d').getImageData(0, 0, width, height);
+      const d2 = c2.getContext('2d').getImageData(0, 0, width, height);
+
+      const { regions, mismatch } = diffToRegions(d1, d2, width, height);
+
+      chrome.runtime.sendMessage({
+        type: 'analysis:complete',
+        ticket,
         tabId,
-        color: BADGE_COLOR[tier] || BADGE_COLOR.safe
-      });
-      await chrome.action.setBadgeText({
-        tabId,
-        text: String(changes.length || 0)
-      });
-
-      // Ask content script to draw overlays
-      await chrome.tabs.sendMessage(tabId, {
-        type: 'visualize:changes',
         mismatch,
-        changes,
+        changes: regions,
         width,
         height
       });
-
-      // Move the baseline forward so repeated focus events compare against the latest
-      st.baseline = current;
-      tabState.set(tabId, st);
     } catch (e) {
-      console.warn('[defender-bg] analysis failed:', e?.message || e);
+      chrome.runtime.sendMessage({
+        type: 'analysis:complete',
+        ticket,
+        tabId,
+        mismatch: 0,
+        changes: [],
+        width: 0,
+        height: 0,
+        error: String(e?.message || e)
+      });
     }
-  }, COMPARE_AFTER_FOCUS_MS);
-};
-
-// ------------------------------
-// Tab/window event wiring
-// ------------------------------
-chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
-  // Mark only the activated tab as active
-  for (const [id, state] of tabState.entries()) {
-    state.active = (id === tabId);
-    if (!state.active) stopTimer(id);
-  }
-
-  // Start/refresh state for the activated tab
-  const st = tabState.get(tabId) || { baseline: null, active: true };
-  st.active = true;
-  tabState.set(tabId, st);
-
-  // Cancel timers for other tabs in the same window
-  const siblings = await chrome.tabs.query({ windowId });
-  for (const t of siblings) {
-    if (t.id !== tabId) stopTimer(t.id);
-  }
-
-  startTimer(tabId);
-
-  // If this tab was previously inactive and had a baseline, compare now
-  compareAfterActivation(tabId);
-});
-
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) {
-    // All windows unfocused – suspend capture loops
-    for (const st of tabState.values()) st.active = false;
-    return;
-  }
-
-  const [activeTab] = await chrome.tabs.query({ active: true, windowId });
-  if (!activeTab?.id) return;
-
-  // Mark this tab active, others in the window inactive
-  const current = tabState.get(activeTab.id) || { baseline: null, active: false };
-  current.active = true;
-  tabState.set(activeTab.id, current);
-
-  const peers = await chrome.tabs.query({ windowId });
-  for (const t of peers) {
-    if (t.id !== activeTab.id) {
-      const peer = tabState.get(t.id);
-      if (peer) peer.active = false;
-      stopTimer(t.id);
-    }
-  }
-
-  startTimer(activeTab.id);
-  compareAfterActivation(activeTab.id);
-});
-
-chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
-  if (info.status === 'complete' && tab?.active && !isBlockedUrl(tab.url)) {
-    const st = tabState.get(tabId) || { baseline: null, active: true };
-    st.active = true;
-    tabState.set(tabId, st);
-    startTimer(tabId);
-  }
-});
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  stopTimer(tabId);
-  tabState.delete(tabId);
-});
-
-// ------------------------------
-// First install bootstrap
-// ------------------------------
-chrome.runtime.onInstalled.addListener(async () => {
-  const actives = await chrome.tabs.query({ active: true });
-  for (const t of actives) {
-    const snap = await captureActiveView(t.id);
-    tabState.set(t.id, { baseline: snap, active: true });
-    startTimer(t.id);
-  }
-});
-
-// ------------------------------
-// Messages from popup / content
-// ------------------------------
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  // Manual baseline: capture a single snapshot now and store it.
-  if (msg?.type === 'manual:baseline' && typeof msg.tabId === 'number') {
-    (async () => {
-      const snap = await captureActiveView(msg.tabId);
-      if (!snap) {
-        sendResponse({ ok: false, error: 'baseline-failed' });
-        return;
-      }
-      const st = tabState.get(msg.tabId) || { baseline: null, active: true };
-      st.baseline = snap;
-      tabState.set(msg.tabId, st);
-
-      // Badge hint that a baseline exists (dot)
-      await chrome.action.setBadgeBackgroundColor({ tabId: msg.tabId, color: BADGE_COLOR.safe });
-      await chrome.action.setBadgeText({ tabId: msg.tabId, text: '•' });
-
-      sendResponse({ ok: true });
-    })();
-    return true; // keep channel open
-  }
-
-  // Manual check: compare now (kept for compatibility with older popup)
-  if (msg?.type === 'manual:check' && typeof msg.tabId === 'number') {
-    (async () => {
-      const st = tabState.get(msg.tabId) || { baseline: null, active: true };
-
-      // If no stored baseline, try to get one first.
-      const beforeImg = st.baseline ?? await captureActiveView(msg.tabId);
-      const afterImg  = await captureActiveView(msg.tabId);
-
-      if (!beforeImg || !afterImg) {
-        sendResponse({ success: false, error: 'capture-failed' });
-        return;
-      }
-
-      try {
-        const { mismatch = 0, changes = [], width = 0, height = 0 } =
-          await analyzePair(msg.tabId, beforeImg, afterImg) || {};
-
-        const tier = classify(mismatch);
-
-        await chrome.action.setBadgeBackgroundColor({
-          tabId: msg.tabId,
-          color: BADGE_COLOR[tier] || BADGE_COLOR.safe
-        });
-        await chrome.action.setBadgeText({
-          tabId: msg.tabId,
-          text: String(changes.length || 0)
-        });
-
-        await chrome.tabs.sendMessage(msg.tabId, {
-          type: 'visualize:changes',
-          mismatch,
-          changes,
-          width,
-          height
-        });
-
-        // Advance baseline so follow-up checks use the latest
-        const keep = tabState.get(msg.tabId) || { baseline: null, active: true };
-        keep.baseline = afterImg;
-        tabState.set(msg.tabId, keep);
-
-        sendResponse({ success: true });
-      } catch (e) {
-        sendResponse({ success: false, error: String(e?.message || e) });
-      }
-    })();
-    return true; // keep channel open
-  }
-});
+  });
+})();

@@ -1,12 +1,10 @@
-// visualizer.js — overlay renderer for on-page change highlights 
+// visualizer.js — overlay renderer for on-page change highlights
 
 (() => {
-  // ---------- constants & ids ----------
   const ROOT_ID = 'tnb-overlay-root';
   const HUD_ID = 'tnb-hud';
   const CSS_ID = 'tnb-style';
 
-  // keep levels consistent with background badge colors
   const levelTint = (lvl) => {
     switch (lvl) {
       case 'critical': return 'rgba(233, 30, 99, 0.55)';  // #E91E63
@@ -16,7 +14,6 @@
     }
   };
 
-  // ---------- dom helpers ----------
   const q = (id) => document.getElementById(id);
 
   const ensureStyle = () => {
@@ -56,7 +53,7 @@
         pointer-events: none;
       }
     `;
-    document.head.appendChild(css);
+    (document.head || document.documentElement).appendChild(css);
   };
 
   const ensureRoot = () => {
@@ -78,22 +75,29 @@
     return hud;
   };
 
-  // ---------- render logic ----------
   const state = {
-    payload: null,      // last { changes, width, height, mismatch }
-    resizeRAF: null,    // rAF handle
+    payload: null,
+    resizeRAF: null,
+  };
+
+  const verdictFromPercent = (changedPct) => {
+    if (changedPct >= 35) return 'Tabnabbing likely';
+    if (changedPct >= 15) return 'Possibly tabnabbing';
+    if (changedPct > 0)  return 'Unlikely tabnabbing';
+    return 'No changes detected';
   };
 
   const updateHud = (mismatch) => {
     const hud = ensureHud();
     const changed = Math.max(0, Number(mismatch) || 0);
     const match = Math.max(0, 100 - changed);
-    // build HUD content via DOM to differ from template-literal approach
-    hud.textContent = ''; // clear
-    const wrap = document.createElement('div');
-    wrap.style.display = 'flex';
-    wrap.style.alignItems = 'center';
-    wrap.style.gap = '8px';
+
+    hud.textContent = '';
+
+    const top = document.createElement('div');
+    top.style.display = 'flex';
+    top.style.alignItems = 'center';
+    top.style.gap = '8px';
 
     const label = document.createElement('span');
     label.style.fontSize = '11px';
@@ -110,10 +114,19 @@
     subtle.style.opacity = '0.72';
     subtle.textContent = `• ${changed.toFixed(1)}% changed`;
 
-    wrap.appendChild(label);
-    wrap.appendChild(strong);
-    wrap.appendChild(subtle);
-    hud.appendChild(wrap);
+    top.appendChild(label);
+    top.appendChild(strong);
+    top.appendChild(subtle);
+
+    const verdict = document.createElement('div');
+    verdict.style.marginTop = '4px';
+    verdict.style.fontSize = '12px';
+    verdict.style.fontWeight = '700';
+    verdict.style.opacity = '.9';
+    verdict.textContent = verdictFromPercent(changed);
+
+    hud.appendChild(top);
+    hud.appendChild(verdict);
   };
 
   const paintRegions = (regions, srcW, srcH) => {
@@ -122,7 +135,6 @@
 
     if (!Array.isArray(regions) || !regions.length || !srcW || !srcH) return;
 
-    // use viewport-based scaling
     const sx = window.innerWidth / srcW;
     const sy = window.innerHeight / srcH;
 
@@ -130,7 +142,6 @@
     for (const r of regions) {
       const box = document.createElement('div');
       box.className = 'tnb-box';
-      // use style props (not one long cssText) to differ from original
       box.style.left = `${(r.x || 0) * sx}px`;
       box.style.top = `${(r.y || 0) * sy}px`;
       box.style.width = `${(r.w || 0) * sx}px`;
@@ -167,7 +178,6 @@
     window.removeEventListener('resize', rerenderOnResize);
   };
 
-  // ---------- message bus ----------
   chrome.runtime.onMessage.addListener((msg) => {
     const { type } = msg || {};
     if (type === 'visualize:changes') {
@@ -181,7 +191,6 @@
       updateHud(state.payload.mismatch);
       paintRegions(state.payload.changes, state.payload.width, state.payload.height);
 
-      // keep overlays aligned with viewport changes
       window.removeEventListener('resize', rerenderOnResize);
       window.addEventListener('resize', rerenderOnResize);
       return;

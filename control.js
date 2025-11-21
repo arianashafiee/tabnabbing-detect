@@ -1,53 +1,40 @@
-// control.js — compact panel with only "Clear Page Highlights" and legends
-
+// Popup control — compact, only "Clear Page Highlights"
 (async () => {
-  // --- status helper ---
-  const status = (msg, kind = 'info') => {
-    const el = document.getElementById('feedback');
-    if (!el) return;
-    el.textContent = msg || '';
-    el.className = kind;
-    if (kind !== 'info') setTimeout(() => { el.textContent = 'Ready.'; el.className = 'info'; }, 3000);
+  const $ = (id) => document.getElementById(id);
+  const setStatus = (msg) => { $('feedback').textContent = msg || ''; };
+
+  const getActive = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
   };
 
-  // --- active tab helper ---
-  const currentTab = async () => {
-    const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
-    return t || null;
-  };
-
-  // include more browser schemes than before (avoid “identical lists”)
-  const systemSchemes = [
-    'chrome://', 'chrome-extension://', 'edge://', 'about:', 'devtools://',
-    'vivaldi://', 'brave://', 'opera://', 'chrome-search://', 'chrome-untrusted://'
+  const SYSTEM_PREFIXES = [
+    'chrome://','chrome-extension://','edge://','about:','devtools://',
+    'brave://','vivaldi://','opera://','moz-extension://'
   ];
-  const isSystemLike = (url) => !url || systemSchemes.some(s => url.startsWith(s));
+  const isSystem = (url) => !url || SYSTEM_PREFIXES.some(p => url.startsWith(p));
 
-  // --- clear button ---
-  document.getElementById('clearBtn')?.addEventListener('click', async () => {
-    const tab = await currentTab();
-    if (!tab?.id) { status('No active tab found.', 'error'); return; }
-
-    // clear badge text always
+  // Clear overlays/badge
+  $('clearBtn').addEventListener('click', async () => {
+    const tab = await getActive();
+    if (!tab?.id) return setStatus('No active tab.');
     chrome.action.setBadgeText({ tabId: tab.id, text: '' });
-
-    // ask content script to remove overlays (may fail on system pages)
     try {
       await chrome.tabs.sendMessage(tab.id, { type: 'visualize:remove' });
-      status('Highlights removed.', 'success');
+      setStatus('Highlights cleared.');
     } catch {
-      status(isSystemLike(tab.url) ? 'Cleared (system page).' : 'Cleared.', 'success');
+      setStatus(isSystem(tab.url) ? 'Highlights cleared (system tab).' : 'Highlights cleared.');
     }
   });
 
-  // --- init ---
-  (async () => {
-    const tab = await currentTab();
-    if (!tab?.id) {
-      document.getElementById('clearBtn').disabled = true;
-      status('Unable to access the active tab.', 'error');
-      return;
-    }
-    status('Ready.');
-  })();
+  // Init
+  const tab = await getActive();
+  if (!tab?.id) {
+    $('clearBtn').disabled = true;
+    setStatus('No active tab.');
+  } else if (isSystem(tab.url)) {
+    setStatus('Runs only on regular web pages.');
+  } else {
+    setStatus('Ready.');
+  }
 })();

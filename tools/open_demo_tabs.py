@@ -14,7 +14,7 @@ URLS = [
     "/demo/high-full-rebrand.html",
     "/demo/area-percent.html?p=25&mode=blur",
     "/demo/dynamic-noise.html",
-    "/demo/cc-attack.html",
+    "/demo/cc-attack.html?auto=0",          # prevent auto-run; requires button + tab-away/return
 ]
 
 def port_in_use(port: int) -> bool:
