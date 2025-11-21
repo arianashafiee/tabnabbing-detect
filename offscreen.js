@@ -1,15 +1,54 @@
-// offscreen.js — fast, canvas-based diff that returns regions + mismatch%
+// offscreen.js — full-region (no grid) diff, color-sensitive, fast.
+// Sends: { type:"tabrewind:result", tabId, mismatch, regions, W, H }
 
 (() => {
-    const CELL_COARSE = 32;
-    const CELL_FINE   = 12;
-    const LOW_GATE    = 0.20; // % from sampler to skip near-zero
-    const MID_GATE    = 3.00; // if >=, verify with Resemble
+    // ---- Tunables (for speed/sensitivity) ----
+    const STEP = 2;              // sample every Nth pixel (2 is fast + precise)
+    const DELTA_E_LOW = 2.0;     // ~barely-visible color change
+    const DELTA_E_KEEP = 4.0;    // treat as changed if >= this ΔE
+    const MIN_REGION_PX = 18 * 18; // discard tiny specks after grouping
   
-    function severityFromMismatch(m) {
+    // Region severity coloring (used by content.js)
+    function levelFromDelta(maxDE) {
+      return maxDE >= 25 ? "high" : maxDE >= 10 ? "medium" : "low";
+    }
+  
+    function severityFromGlobal(m) {
       return m >= 30 ? "high" : m >= 10 ? "medium" : "low";
     }
   
+    // ---------- Color space helpers (RGB -> Lab -> ΔE76) ----------
+    function srgbToLinear(c) {
+      c /= 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function rgbToXyz(r, g, b) {
+      const R = srgbToLinear(r), G = srgbToLinear(g), B = srgbToLinear(b);
+      const X = R * 0.4124564 + G * 0.3575761 + B * 0.1804375;
+      const Y = R * 0.2126729 + G * 0.7151522 + B * 0.0721750;
+      const Z = R * 0.0193339 + G * 0.1191920 + B * 0.9503041;
+      return [X, Y, Z];
+    }
+    function xyzToLab(x, y, z) {
+      // D65 reference white
+      const Xn = 0.95047, Yn = 1.00000, Zn = 1.08883;
+      const f = t => (t > 0.008856) ? Math.cbrt(t) : (7.787 * t + 16 / 116);
+      const fx = f(x / Xn), fy = f(y / Yn), fz = f(z / Zn);
+      const L = 116 * fy - 16;
+      const a = 500 * (fx - fy);
+      const b = 200 * (fy - fz);
+      return [L, a, b];
+    }
+    function rgbToLab(r, g, b) {
+      const [x, y, z] = rgbToXyz(r, g, b);
+      return xyzToLab(x, y, z);
+    }
+    function deltaE76(L1, a1, b1, L2, a2, b2) {
+      const dL = L1 - L2, da = a1 - a2, db = b1 - b2;
+      return Math.sqrt(dL * dL + da * da + db * db);
+    }
+  
+    // ---------- Image I/O ----------
     function loadImg(url) {
       return new Promise((res, rej) => {
         const i = new Image();
@@ -19,115 +58,121 @@
       });
     }
   
-    async function prepCanvases(beforeURL, afterURL) {
-      const [before, after] = await Promise.all([loadImg(beforeURL), loadImg(afterURL)]);
-      const W = Math.min(before.width, after.width);
-      const H = Math.min(before.height, after.height);
-  
-      const c1 = new OffscreenCanvas(W, H), g1 = c1.getContext("2d", { willReadFrequently: true });
-      const c2 = new OffscreenCanvas(W, H), g2 = c2.getContext("2d", { willReadFrequently: true });
-      g1.drawImage(before, 0, 0, W, H);
-      g2.drawImage(after,  0, 0, W, H);
-      return { W, H, g1, g2 };
+    function makeCanvas(w, h) {
+      if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(w, h);
+      const c = self.document.createElement("canvas");
+      c.width = w; c.height = h;
+      return c;
     }
   
-    function sampledDiffPct(aData, bData, stride = 6) {
-      const a = aData.data, b = bData.data;
-      let diffs = 0, total = 0;
-      for (let i = 0; i < a.length; i += 4 * stride) {
-        const dr = a[i] - b[i], dg = a[i+1] - b[i+1], db = a[i+2] - b[i+2];
-        if ((Math.abs(dr)*0.3 + Math.abs(dg)*0.59 + Math.abs(db)*0.11) > 8) diffs++;
-        total++;
+    async function getImageDataPair(beforeURL, afterURL) {
+      const [A, B] = await Promise.all([loadImg(beforeURL), loadImg(afterURL)]);
+      const W = Math.min(A.width, B.width);
+      const H = Math.min(A.height, B.height);
+  
+      const c1 = makeCanvas(W, H), g1 = c1.getContext("2d", { willReadFrequently: true });
+      const c2 = makeCanvas(W, H), g2 = c2.getContext("2d", { willReadFrequently: true });
+      g1.drawImage(A, 0, 0, W, H);
+      g2.drawImage(B, 0, 0, W, H);
+      const d1 = g1.getImageData(0, 0, W, H);
+      const d2 = g2.getImageData(0, 0, W, H);
+      return { W, H, d1, d2 };
+    }
+  
+    // ---------- Global mismatch via Resemble (for badge consistency) ----------
+    function globalMismatchResemble(beforeURL, afterURL) {
+      return new Promise(resolve => {
+        if (typeof resemble === "undefined") return resolve(0);
+        try {
+          resemble(beforeURL).compareTo(afterURL).ignoreNothing().onComplete(d => {
+            const p = parseFloat(d?.rawMisMatchPercentage ?? d?.misMatchPercentage ?? "0") || 0;
+            resolve(p);
+          });
+        } catch { resolve(0); }
+      });
+    }
+  
+    // ---------- Full-frame mask + connected components (no grid drawn) ----------
+    function buildMaskAndStats(d1, d2, W, H) {
+      const a = d1.data, b = d2.data;
+  
+      const rows = Math.ceil(H / STEP), cols = Math.ceil(W / STEP);
+      const mask = new Uint8Array(rows * cols); // 0/1
+      const deltas = new Float32Array(rows * cols); // store ΔE for severity
+      let changed = 0, total = 0, maxDEGlobal = 0;
+  
+      // Cache: convert each sampled pixel to Lab and compare
+      for (let y = 0, rr = 0; y < H; y += STEP, rr++) {
+        for (let x = 0, cc = 0; x < W; x += STEP, cc++) {
+          const idx = (y * W + x) * 4;
+          const r1 = a[idx], g1 = a[idx + 1], b1 = a[idx + 2];
+          const r2 = b[idx], g2 = b[idx + 1], b2 = b[idx + 2];
+  
+          const [L1, A1, B1] = rgbToLab(r1, g1, b1);
+          const [L2, A2, B2] = rgbToLab(r2, g2, b2);
+          const dE = deltaE76(L1, A1, B1, L2, A2, B2);
+  
+          deltas[rr * cols + cc] = dE;
+          if (dE >= DELTA_E_KEEP) {
+            mask[rr * cols + cc] = 1;
+            changed++;
+            if (dE > maxDEGlobal) maxDEGlobal = dE;
+          }
+          total++;
+        }
       }
-      return (diffs / total) * 100;
+      const mismatchApprox = (changed / total) * 100;
+      return { mask, deltas, rows, cols, mismatchApprox, maxDEGlobal };
     }
   
-    function getCell(g, sx, sy, sw, sh) {
-      return g.getImageData(sx, sy, sw, sh);
-    }
+    function componentsToBoxes(mask, deltas, rows, cols) {
+      const seen = new Uint8Array(mask.length);
+      const boxes = [];
   
-    function resemblePct(aData, bData) {
-      return new Promise(resolve => {
-        if (typeof resemble === "undefined") return resolve(0);
-        try {
-          resemble(aData).compareTo(bData).ignoreAntialiasing().ignoreLess().onComplete(d => {
-            resolve(parseFloat(d?.rawMisMatchPercentage ?? d?.misMatchPercentage ?? "0") || 0);
-          });
-        } catch { resolve(0); }
-      });
-    }
+      const nbrs = (r, c) => [
+        [r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]
+      ];
   
-    function resembleGlobalPct(beforeURL, afterURL) {
-      return new Promise(resolve => {
-        if (typeof resemble === "undefined") return resolve(0);
-        try {
-          resemble(beforeURL).compareTo(afterURL).ignoreAntialiasing().ignoreLess().onComplete(d => {
-            resolve(parseFloat(d?.rawMisMatchPercentage ?? d?.misMatchPercentage ?? "0") || 0);
-          });
-        } catch { resolve(0); }
-      });
-    }
-  
-    async function diffCoarse(beforeURL, afterURL) {
-      const { W, H, g1, g2 } = await prepCanvases(beforeURL, afterURL);
-  
-      const cols = Math.ceil(W / CELL_COARSE);
-      const rows = Math.ceil(H / CELL_COARSE);
-  
-      const regions = [];
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
-          const sx = c * CELL_COARSE, sy = r * CELL_COARSE;
-          const sw = Math.min(CELL_COARSE, W - sx), sh = Math.min(CELL_COARSE, H - sy);
-          const A = getCell(g1, sx, sy, sw, sh);
-          const B = getCell(g2, sx, sy, sw, sh);
+          const idx = r * cols + c;
+          if (!mask[idx] || seen[idx]) continue;
   
-          const approx = sampledDiffPct(A, B, 6);
-          if (approx < LOW_GATE) continue;
+          let minR = r, maxR = r, minC = c, maxC = c;
+          let pixels = 0, maxDE = 0;
   
-          let pct = approx;
-          if (approx >= MID_GATE) pct = await resemblePct(A, B);
+          const q = [[r, c]];
+          seen[idx] = 1;
   
-          if (pct >= 0.25) {
-            const level = pct >= 40 ? "high" : pct >= 15 ? "medium" : "low";
-            regions.push({ x:sx, y:sy, w:sw, h:sh, level, maxPct:pct });
-          }
-        }
-        // yield per row to keep worker responsive
-        await new Promise(r => setTimeout(r, 0));
-      }
+          while (q.length) {
+            const [rr, cc] = q.pop();
+            const id = rr * cols + cc;
+            pixels++;
+            if (deltas[id] > maxDE) maxDE = deltas[id];
+            if (rr < minR) minR = rr; if (rr > maxR) maxR = rr;
+            if (cc < minC) minC = cc; if (cc > maxC) maxC = cc;
   
-      return { regions, W, H };
-    }
-  
-    async function diffRefine(beforeURL, afterURL, coarse) {
-      if (!coarse?.regions?.length) return coarse;
-      const { W, H, g1, g2 } = await prepCanvases(beforeURL, afterURL);
-  
-      const refined = [];
-      for (const box of coarse.regions) {
-        const colsF = Math.ceil(box.w / CELL_FINE);
-        const rowsF = Math.ceil(box.h / CELL_FINE);
-        for (let rr = 0; rr < rowsF; rr++) {
-          for (let cc = 0; cc < colsF; cc++) {
-            const sx = box.x + cc * CELL_FINE, sy = box.y + rr * CELL_FINE;
-            const sw = Math.min(CELL_FINE, box.x + box.w - sx), sh = Math.min(CELL_FINE, box.y + box.h - sy);
-            const A = getCell(g1, sx, sy, sw, sh);
-            const B = getCell(g2, sx, sy, sw, sh);
-  
-            const approx = sampledDiffPct(A, B, 4);
-            if (approx < LOW_GATE) continue;
-  
-            let pct = approx >= MID_GATE ? await resemblePct(A, B) : approx;
-            if (pct >= 0.5) {
-              const level = pct >= 40 ? "high" : pct >= 15 ? "medium" : "low";
-              refined.push({ x:sx, y:sy, w:sw, h:sh, level, maxPct:pct });
+            for (const [nr, nc] of nbrs(rr, cc)) {
+              if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue;
+              const nid = nr * cols + nc;
+              if (!seen[nid] && mask[nid]) {
+                seen[nid] = 1;
+                q.push([nr, nc]);
+              }
             }
           }
+  
+          // Convert from STEP-grid units back to pixel space
+          const x = minC * STEP, y = minR * STEP;
+          const w = (maxC - minC + 1) * STEP;
+          const h = (maxR - minR + 1) * STEP;
+  
+          if (w * h >= MIN_REGION_PX) {
+            boxes.push({ x, y, w, h, level: levelFromDelta(maxDE), maxPct: maxDE });
+          }
         }
-        await new Promise(r => setTimeout(r, 0));
       }
-      return { regions: refined.length ? refined : coarse.regions, W, H };
+      return boxes;
     }
   
     chrome.runtime.onMessage.addListener(async (msg) => {
@@ -135,32 +180,28 @@
       const { tabId, before, after } = msg;
   
       try {
-        // Global % used for similarity + badge color
-        const mismatch = await resembleGlobalPct(before, after);
+        // 1) Global mismatch (Resemble, ignoreNothing to capture color changes)
+        const globalMismatch = await globalMismatchResemble(before, after);
   
-        // Coarse (fast) first, then refine in the background and push an update
-        const coarse = await diffCoarse(before, after);
+        // 2) Mask + components for full-region boxes (no grid overlay)
+        const { W, H, d1, d2 } = await getImageDataPair(before, after);
+        const { mask, deltas, rows, cols, mismatchApprox } = buildMaskAndStats(d1, d2, W, H);
   
+        // Prefer Resemble’s % if available; fall back to mask estimate
+        const mismatch = globalMismatch > 0 ? globalMismatch : mismatchApprox;
+  
+        const regions = componentsToBoxes(mask, deltas, rows, cols);
+  
+        // 3) Emit result
         chrome.runtime.sendMessage({
           type: "tabrewind:result",
           tabId,
           mismatch,
-          regions: coarse.regions,
-          W: coarse.W, H: coarse.H
+          regions,
+          W, H
         });
   
-        // Optional refinement: send improved regions when ready
-        queueMicrotask(async () => {
-          const refined = await diffRefine(before, after, coarse);
-          if (!refined || !refined.regions) return;
-          chrome.runtime.sendMessage({
-            type: "tabrewind:result",
-            tabId,
-            mismatch,
-            regions: refined.regions,
-            W: refined.W, H: refined.H
-          });
-        });
+        // (No second pass; first paint is fast and final)
   
       } catch (e) {
         chrome.runtime.sendMessage({

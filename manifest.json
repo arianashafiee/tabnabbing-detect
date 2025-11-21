@@ -1,15 +1,15 @@
 {
     "manifest_version": 3,
     "name": "Tab Rewind Guard",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Detects tabnabbing by comparing a tab before/after focus changes; highlights changes and shows similarity.",
-    "permissions": ["tabs", "activeTab"],
+    "permissions": ["tabs", "activeTab", "offscreen"],
     "host_permissions": ["<all_urls>"],
     "background": { "service_worker": "background.js" },
     "content_scripts": [
       {
         "matches": ["<all_urls>"],
-        "js": ["vendor/resemble.js", "content.js"],
+        "js": ["content.js"],
         "run_at": "document_idle"
       }
     ],
